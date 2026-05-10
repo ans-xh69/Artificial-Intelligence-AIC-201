@@ -1,25 +1,36 @@
 """
 gui_simulator.py
-Real-time Tkinter GUI for AIDRA simulation.
-Shows animated grid, live decision log, KPI panel, and step-by-step execution.
+Enhanced AIDRA GUI with decision log, algorithm comparison, speed control.
+Fixes: Hill Climbing/Simulated Annealing routing, plot graph metrics.
 
 Run: python gui_simulator.py
 """
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext
-import time
+from tkinter import ttk, scrolledtext, messagebox
 from typing import List, Tuple, Optional, Dict
+import random
 from environment import GridMap, Victim, Resources, EventSimulator, CELL_BLOCKED, CELL_HIGH_RISK
-from search import astar
+from search import bfs, dfs, greedy_best_first, astar, hill_climbing, SearchResult
 from csp import solve_csp
 from ml_model import train_and_evaluate, victim_features
 from uncertainty import fuzzy_decision
 from metrics import KPITracker
 
 
-# ── Color Scheme ───────────────────────────────────────────────────────────────
+# ── Dark Theme Colors ──────────────────────────────────────────────────────────
 COLORS = {
+    "bg_dark":    "#0d1117",
+    "bg_panel":   "#161b22",
+    "bg_input":   "#0d1117",
+    "border":     "#30363d",
+    "text":       "#c9d1d9",
+    "text_dim":   "#8b949e",
+    "accent":     "#58a6ff",
+    "success":    "#3fb950",
+    "warning":    "#d29922",
+    "danger":     "#f85149",
+    # Grid colors
     "free":       "#f0f4f8",
     "blocked":    "#2d3748",
     "high_risk":  "#fc8181",
@@ -38,12 +49,13 @@ class AIDRASimulatorGUI:
     def __init__(self, root, grid_map: GridMap, victims: List[Victim],
                  resources: Resources, event_sim: EventSimulator):
         self.root = root
-        self.root.title("AIDRA — Real-Time Disaster Response Simulation")
-        self.root.geometry("1400x900")
-        self.root.configure(bg="#edf2f7")
+        self.root.title("AIDRA — Disaster Response Simulator")
+        self.root.geometry("1600x950")
+        self.root.configure(bg=COLORS["bg_dark"])
 
         self.map = grid_map
         self.victims = victims
+        self.victims_backup = [Victim(v.id, v.position, v.severity) for v in victims]
         self.resources = resources
         self.events = event_sim
         self.kpis = KPITracker()
@@ -53,108 +65,200 @@ class AIDRASimulatorGUI:
         self.step = 0
         self.current_route: List[Tuple[int, int]] = []
         self.agent_pos = grid_map.rescue_base
-        self.animation_speed = 300  # ms per step
+        self.animation_speed = 300
         self.is_running = False
         self.route_index = 0
+        self.ml_trained = False
+        self.knn, self.nb = None, None
 
-        # ML models
-        self.knn = None
-        self.nb = None
+        # Comparison data
+        self.comparison_data: Dict[str, Dict] = {}
+        self.last_run_kpis: Dict = {}
 
-        # UI elements
+        # UI setup
         self.cell_size = 50
         self.setup_ui()
         self.draw_grid()
         self.update_kpi_display()
-        self.log("System initialized. Click START to begin simulation.")
+        self.log("System initialized. Select algorithm and press RUN.", COLORS["accent"])
 
     # ── UI Setup ───────────────────────────────────────────────────────────────
 
     def setup_ui(self):
-        # Main container
-        main_frame = tk.Frame(self.root, bg="#edf2f7")
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        main_frame = tk.Frame(self.root, bg=COLORS["bg_dark"])
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
 
-        # Left panel: Grid
-        left_panel = tk.Frame(main_frame, bg="white", relief=tk.RIDGE, bd=2)
-        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
-
-        title = tk.Label(left_panel, text="AIDRA — Disaster Response Grid",
-                         font=("Arial", 14, "bold"), bg="white", fg="#2d3748")
-        title.pack(pady=10)
+        # Left: Grid
+        left_panel = tk.Frame(main_frame, bg=COLORS["bg_panel"], relief=tk.FLAT, bd=0)
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 15))
 
         self.canvas = tk.Canvas(left_panel, width=self.map.cols * self.cell_size,
-                                height=self.map.rows * self.cell_size, bg="white")
-        self.canvas.pack(padx=10, pady=10)
+                                height=self.map.rows * self.cell_size,
+                                bg="white", highlightthickness=0)
+        self.canvas.pack(padx=15, pady=15)
 
-        # Right panel: Controls + Log + KPIs
-        right_panel = tk.Frame(main_frame, bg="#edf2f7")
-        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=False)
+        # Right: Controls + Tables + Log
+        right_panel = tk.Frame(main_frame, bg=COLORS["bg_dark"])
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH)
 
-        # Controls
-        control_frame = tk.LabelFrame(right_panel, text="Simulation Controls",
-                                      font=("Arial", 11, "bold"), bg="white",
-                                      fg="#2d3748", padx=10, pady=10)
-        control_frame.pack(fill=tk.X, pady=(0, 10))
+        self.setup_controls(right_panel)
+        self.setup_last_run_kpis(right_panel)
+        self.setup_comparison_table(right_panel)
+        self.setup_decision_log(right_panel)
+        self.setup_ml_section(right_panel)
 
-        self.start_btn = tk.Button(control_frame, text="▶ START", command=self.start_simulation,
-                                   bg="#48bb78", fg="white", font=("Arial", 11, "bold"),
-                                   width=12, cursor="hand2")
-        self.start_btn.grid(row=0, column=0, padx=5, pady=5)
+    def setup_controls(self, parent):
+        frame = tk.LabelFrame(parent, text="Controls", bg=COLORS["bg_panel"],
+                             fg=COLORS["text"], font=("Consolas", 10, "bold"),
+                             bd=1, relief=tk.SOLID)
+        frame.pack(fill=tk.X, pady=(0, 10))
 
-        self.pause_btn = tk.Button(control_frame, text="⏸ PAUSE", command=self.pause_simulation,
-                                   bg="#ed8936", fg="white", font=("Arial", 11, "bold"),
-                                   width=12, state=tk.DISABLED, cursor="hand2")
-        self.pause_btn.grid(row=0, column=1, padx=5, pady=5)
+        # Row 0: Algorithm + ML Status
+        tk.Label(frame, text="Algorithm:", bg=COLORS["bg_panel"],
+                fg=COLORS["text"], font=("Consolas", 9)).grid(row=0, column=0, sticky="w", padx=10, pady=5)
 
-        self.reset_btn = tk.Button(control_frame, text="↻ RESET", command=self.reset_simulation,
-                                   bg="#4299e1", fg="white", font=("Arial", 11, "bold"),
-                                   width=12, cursor="hand2")
-        self.reset_btn.grid(row=1, column=0, columnspan=2, padx=5, pady=5)
+        self.algo_var = tk.StringVar(value="A*")
+        algo_dropdown = ttk.Combobox(frame, textvariable=self.algo_var,
+            values=["BFS", "DFS", "Greedy", "A*", "Hill Climbing", "Sim. Annealing"],
+            state="readonly", width=18, font=("Consolas", 9))
+        algo_dropdown.grid(row=0, column=1, padx=5, pady=5)
 
-        # Speed control
-        speed_label = tk.Label(control_frame, text="Animation Speed:", bg="white",
-                              font=("Arial", 10))
-        speed_label.grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        self.ml_status = tk.Label(frame, text="● NOT TRAINED", bg=COLORS["bg_panel"],
+                                 fg=COLORS["danger"], font=("Consolas", 9, "bold"))
+        self.ml_status.grid(row=0, column=2, padx=10)
+
+        # Row 1: Risk Mode
+        tk.Label(frame, text="Risk Mode:", bg=COLORS["bg_panel"],
+                fg=COLORS["text"], font=("Consolas", 9)).grid(row=1, column=0, sticky="w", padx=10, pady=5)
+
+        self.risk_mode = tk.StringVar(value="Balanced")
+        risk_frame = tk.Frame(frame, bg=COLORS["bg_panel"])
+        risk_frame.grid(row=1, column=1, columnspan=2, sticky="w", padx=5)
+
+        for mode in ["Fast", "Balanced", "Safe"]:
+            rb = tk.Radiobutton(risk_frame, text=mode, variable=self.risk_mode,
+                               value=mode, bg=COLORS["bg_panel"], fg=COLORS["text"],
+                               selectcolor=COLORS["bg_input"], font=("Consolas", 9),
+                               activebackground=COLORS["bg_panel"])
+            rb.pack(side=tk.LEFT, padx=5)
+
+        # Row 2: Buttons
+        btn_frame = tk.Frame(frame, bg=COLORS["bg_panel"])
+        btn_frame.grid(row=2, column=0, columnspan=3, pady=10)
+
+        self.run_btn = tk.Button(btn_frame, text="▶ RUN", command=self.start_simulation,
+                                bg=COLORS["success"], fg="white", font=("Consolas", 10, "bold"),
+                                width=10, cursor="hand2", relief=tk.FLAT)
+        self.run_btn.pack(side=tk.LEFT, padx=5)
+
+        self.reset_btn = tk.Button(btn_frame, text="⟲ RESET", command=self.reset_simulation,
+                                   bg=COLORS["danger"], fg="white", font=("Consolas", 10, "bold"),
+                                   width=10, cursor="hand2", relief=tk.FLAT)
+        self.reset_btn.pack(side=tk.LEFT, padx=5)
+
+        self.train_btn = tk.Button(btn_frame, text="🧠 TRAIN ML", command=self.train_ml_models,
+                                   bg=COLORS["accent"], fg="white", font=("Consolas", 10, "bold"),
+                                   width=12, cursor="hand2", relief=tk.FLAT)
+        self.train_btn.pack(side=tk.LEFT, padx=5)
+
+        # Row 3: Speed control
+        tk.Label(frame, text="Speed:", bg=COLORS["bg_panel"],
+                fg=COLORS["text"], font=("Consolas", 9)).grid(row=3, column=0, sticky="w", padx=10, pady=5)
 
         self.speed_var = tk.IntVar(value=300)
-        speed_slider = tk.Scale(control_frame, from_=50, to=1000, orient=tk.HORIZONTAL,
+        speed_slider = tk.Scale(frame, from_=50, to=1000, orient=tk.HORIZONTAL,
                                variable=self.speed_var, command=self.update_speed,
-                               bg="white", length=200)
-        speed_slider.grid(row=3, column=0, columnspan=2, pady=(0, 5))
+                               bg=COLORS["bg_panel"], fg=COLORS["text"],
+                               highlightthickness=0, length=250, troughcolor=COLORS["bg_input"])
+        speed_slider.grid(row=3, column=1, columnspan=2, sticky="w", padx=5)
 
-        # KPI Panel
-        kpi_frame = tk.LabelFrame(right_panel, text="Live KPIs",
-                                 font=("Arial", 11, "bold"), bg="white",
-                                 fg="#2d3748", padx=10, pady=10)
-        kpi_frame.pack(fill=tk.X, pady=(0, 10))
+        # Row 4: Info
+        info = tk.Label(frame, text="ⓘ Switch algorithm freely — no reset needed.",
+                       bg=COLORS["bg_panel"], fg=COLORS["text_dim"], font=("Consolas", 8))
+        info.grid(row=4, column=0, columnspan=3, pady=(0, 5))
+
+    def setup_last_run_kpis(self, parent):
+        frame = tk.LabelFrame(parent, text="Last Run — KPIs", bg=COLORS["bg_panel"],
+                             fg=COLORS["text"], font=("Consolas", 10, "bold"), bd=1, relief=tk.SOLID)
+        frame.pack(fill=tk.X, pady=(0, 10))
 
         self.kpi_labels = {}
-        kpi_items = [
-            ("Victims Saved", "0 / 5"),
-            ("Current Step", "0"),
-            ("Avg Rescue Time", "0.0 steps"),
-            ("Kits Used", "0 / 10"),
-            ("Replan Events", "0"),
+        kpis = [
+            ("Victims Saved:", "—"),
+            ("Avg Rescue Time:", "—"),
+            ("Risk Exposure:", "—"),
+            ("Resource Util:", "—"),
+            ("CSP Backtracks:", "—"),
         ]
-        for i, (key, default_val) in enumerate(kpi_items):
-            tk.Label(kpi_frame, text=f"{key}:", bg="white",
-                    font=("Arial", 9, "bold"), anchor="w").grid(row=i, column=0, sticky="w", pady=2)
-            label = tk.Label(kpi_frame, text=default_val, bg="white",
-                           font=("Arial", 9), fg="#4299e1", anchor="e")
-            label.grid(row=i, column=1, sticky="e", pady=2)
-            self.kpi_labels[key] = label
+        for i, (key, val) in enumerate(kpis):
+            tk.Label(frame, text=key, bg=COLORS["bg_panel"], fg=COLORS["text_dim"],
+                    font=("Consolas", 9), anchor="w").grid(row=i, column=0, sticky="w", padx=10, pady=3)
+            lbl = tk.Label(frame, text=val, bg=COLORS["bg_panel"], fg=COLORS["accent"],
+                          font=("Consolas", 9, "bold"), anchor="e")
+            lbl.grid(row=i, column=1, sticky="e", padx=10, pady=3)
+            self.kpi_labels[key] = lbl
 
-        # Decision Log
-        log_frame = tk.LabelFrame(right_panel, text="Decision Log",
-                                 font=("Arial", 11, "bold"), bg="white",
-                                 fg="#2d3748", padx=5, pady=5)
-        log_frame.pack(fill=tk.BOTH, expand=True)
+    def setup_comparison_table(self, parent):
+        frame = tk.LabelFrame(parent, text="Algorithm Comparison", bg=COLORS["bg_panel"],
+                             fg=COLORS["text"], font=("Consolas", 10, "bold"), bd=1, relief=tk.SOLID)
+        frame.pack(fill=tk.BOTH, expand=False, pady=(0, 10))
 
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=20, width=50,
-                                                  font=("Courier", 9), bg="#f7fafc",
-                                                  fg="#2d3748", wrap=tk.WORD)
-        self.log_text.pack(fill=tk.BOTH, expand=True)
+        # Treeview
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("Treeview", background=COLORS["bg_input"], foreground=COLORS["text"],
+                       fieldbackground=COLORS["bg_input"], font=("Consolas", 9))
+        style.configure("Treeview.Heading", background=COLORS["bg_panel"],
+                       foreground=COLORS["warning"], font=("Consolas", 9, "bold"))
+        style.map("Treeview", background=[("selected", COLORS["accent"])])
+
+        cols = ("Saved", "AvgTime", "Risk", "Nodes", "BT")
+        self.comp_table = ttk.Treeview(frame, columns=cols, height=6, show="tree headings")
+        self.comp_table.heading("#0", text="Algorithm")
+        self.comp_table.column("#0", width=120, anchor="w")
+        for col in cols:
+            self.comp_table.heading(col, text=col)
+            self.comp_table.column(col, width=60, anchor="center")
+        self.comp_table.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Buttons
+        btn_frame = tk.Frame(frame, bg=COLORS["bg_panel"])
+        btn_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        tk.Button(btn_frame, text="📊 Plot Graph", command=self.plot_comparison,
+                 bg=COLORS["accent"], fg="white", font=("Consolas", 9, "bold"),
+                 relief=tk.FLAT, cursor="hand2").pack(side=tk.LEFT, padx=5)
+
+        tk.Button(btn_frame, text="✖ Clear", command=self.clear_table,
+                 bg=COLORS["danger"], fg="white", font=("Consolas", 9, "bold"),
+                 relief=tk.FLAT, cursor="hand2").pack(side=tk.LEFT, padx=5)
+
+    def setup_decision_log(self, parent):
+        frame = tk.LabelFrame(parent, text="Decision Log", bg=COLORS["bg_panel"],
+                             fg=COLORS["text"], font=("Consolas", 10, "bold"), bd=1, relief=tk.SOLID)
+        frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        self.log_text = scrolledtext.ScrolledText(frame, height=12, width=50,
+                                                  font=("Consolas", 9), bg=COLORS["bg_input"],
+                                                  fg=COLORS["text"], wrap=tk.WORD,
+                                                  insertbackground=COLORS["text"])
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Configure tags for colored text
+        self.log_text.tag_config("accent", foreground=COLORS["accent"])
+        self.log_text.tag_config("success", foreground=COLORS["success"])
+        self.log_text.tag_config("warning", foreground=COLORS["warning"])
+        self.log_text.tag_config("danger", foreground=COLORS["danger"])
+
+    def setup_ml_section(self, parent):
+        frame = tk.LabelFrame(parent, text="ML Metrics (kNN | Naive Bayes)", bg=COLORS["bg_panel"],
+                             fg=COLORS["text"], font=("Consolas", 10, "bold"), bd=1, relief=tk.SOLID)
+        frame.pack(fill=tk.X)
+
+        self.ml_info = tk.Label(frame, text="Auto-trains on first RUN, or press 🧠 TRAIN ML.",
+                               bg=COLORS["bg_panel"], fg=COLORS["success"],
+                               font=("Consolas", 9), wraplength=400, justify="left")
+        self.ml_info.pack(padx=10, pady=10)
 
     # ── Grid Drawing ───────────────────────────────────────────────────────────
 
@@ -162,7 +266,6 @@ class AIDRASimulatorGUI:
         self.canvas.delete("all")
         cs = self.cell_size
 
-        # Draw cells
         for r in range(self.map.rows):
             for c in range(self.map.cols):
                 x1, y1 = c * cs, r * cs
@@ -179,7 +282,7 @@ class AIDRASimulatorGUI:
                 self.canvas.create_rectangle(x1, y1, x2, y2, fill=color,
                                             outline="#cbd5e0", width=1)
 
-        # Draw route
+        # Route
         if self.current_route and len(self.current_route) > 1:
             for i in range(len(self.current_route) - 1):
                 r1, c1 = self.current_route[i]
@@ -189,24 +292,23 @@ class AIDRASimulatorGUI:
                 self.canvas.create_line(x1, y1, x2, y2, fill=COLORS["route"],
                                       width=4, dash=(5, 3))
 
-        # Draw base
+        # Base
         br, bc = self.map.rescue_base
         self.draw_circle(br, bc, COLORS["base"], "B")
 
-        # Draw medical centers
+        # Centers
         for mr, mc in self.map.medical_centers:
             self.draw_circle(mr, mc, COLORS["center"], "M")
 
-        # Draw victims
+        # Victims
         for v in self.victims:
             vr, vc = v.position
             if v.rescued:
-                self.draw_circle(vr, vc, COLORS["rescued"], "✓", text_color="white")
+                self.draw_circle(vr, vc, COLORS["rescued"], "✓", "white")
             else:
-                sev_color = COLORS.get(v.severity, COLORS["moderate"])
-                self.draw_circle(vr, vc, sev_color, f"V{v.id}")
+                self.draw_circle(vr, vc, COLORS[v.severity], f"V{v.id}")
 
-        # Draw agent
+        # Agent
         ar, ac = self.agent_pos
         self.draw_agent(ar, ac)
 
@@ -230,35 +332,50 @@ class AIDRASimulatorGUI:
 
     # ── Logging ────────────────────────────────────────────────────────────────
 
-    def log(self, message: str, color: str = "black"):
-        self.log_text.insert(tk.END, f"{message}\n", color)
+    def log(self, msg: str, color_tag: str = None):
+        if color_tag:
+            # Extract color name from hex code
+            tag_name = {v: k for k, v in COLORS.items()}.get(color_tag, "accent")
+            self.log_text.insert(tk.END, f"{msg}\n", tag_name)
+        else:
+            self.log_text.insert(tk.END, f"{msg}\n")
         self.log_text.see(tk.END)
         self.log_text.update()
 
-    # ── Control Handlers ───────────────────────────────────────────────────────
+    # ── Controls ───────────────────────────────────────────────────────────────
+
+    def update_speed(self, val):
+        self.animation_speed = int(val)
+
+    def train_ml_models(self):
+        if self.ml_trained:
+            messagebox.showinfo("Already Trained", "ML models are already trained.")
+            return
+        self.log("Training ML models (kNN + Naive Bayes)...", COLORS["warning"])
+        self.knn, self.nb, knn_m, nb_m = train_and_evaluate()
+        self.kpis.record_ml("kNN", knn_m)
+        self.kpis.record_ml("Naive Bayes", nb_m)
+        self.ml_trained = True
+        self.ml_status.config(text="✓ TRAINED", fg=COLORS["success"])
+        self.train_btn.config(state=tk.DISABLED)
+        self.ml_info.config(text=f"kNN Acc: {knn_m['accuracy']:.3f} | NB Acc: {nb_m['accuracy']:.3f}",
+                           fg=COLORS["accent"])
+        self.log("✓ ML training complete.", COLORS["success"])
 
     def start_simulation(self):
-        if not self.is_running:
-            self.is_running = True
-            self.start_btn.config(state=tk.DISABLED)
-            self.pause_btn.config(state=tk.NORMAL)
-            self.log("═" * 50, "blue")
-            self.log("▶ SIMULATION STARTED", "green")
-            self.log("═" * 50, "blue")
+        if self.is_running:
+            return
 
-            # Train ML models
-            if self.knn is None:
-                self.log("Training ML models (kNN + Naive Bayes)...", "purple")
-                self.knn, self.nb, _, _ = train_and_evaluate()
-                self.log("✓ ML models trained successfully", "green")
+        # Auto-train if needed
+        if not self.ml_trained:
+            self.train_ml_models()
 
-            self.run_agent()
-
-    def pause_simulation(self):
-        self.is_running = False
-        self.start_btn.config(state=tk.NORMAL)
-        self.pause_btn.config(state=tk.DISABLED)
-        self.log("⏸ SIMULATION PAUSED", "orange")
+        self.is_running = True
+        self.run_btn.config(state=tk.DISABLED)
+        self.log("═" * 50, COLORS["accent"])
+        self.log(f"▶ SIMULATION STARTED ({self.algo_var.get()})", COLORS["success"])
+        self.log("═" * 50, COLORS["accent"])
+        self.run_agent()
 
     def reset_simulation(self):
         self.is_running = False
@@ -268,9 +385,7 @@ class AIDRASimulatorGUI:
         self.agent_pos = self.map.rescue_base
 
         # Reset victims
-        for v in self.victims:
-            v.rescued = False
-            v.rescue_time = None
+        self.victims = [Victim(v.id, v.position, v.severity) for v in self.victims_backup]
 
         # Reset KPIs
         self.kpis = KPITracker()
@@ -278,66 +393,122 @@ class AIDRASimulatorGUI:
 
         self.draw_grid()
         self.update_kpi_display()
-        self.log_text.delete(1.0, tk.END)
-        self.log("↻ SIMULATION RESET", "blue")
-        self.start_btn.config(state=tk.NORMAL)
-        self.pause_btn.config(state=tk.DISABLED)
+        self.run_btn.config(state=tk.NORMAL)
+        self.log("↻ Simulation reset.", COLORS["accent"])
 
-    def update_speed(self, val):
-        self.animation_speed = int(val)
+    def clear_table(self):
+        for item in self.comp_table.get_children():
+            self.comp_table.delete(item)
+        self.comparison_data = {}
+        self.log("✖ Comparison table cleared.", COLORS["warning"])
+
+    def plot_comparison(self):
+        if not self.comparison_data:
+            messagebox.showwarning("No Data", "Run at least one simulation first.")
+            return
+        
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            import numpy as np
+
+            algos = list(self.comparison_data.keys())
+            avg_nodes = [float(self.comparison_data[a]["avg_nodes"]) for a in algos]
+            avg_time = [float(self.comparison_data[a]["time"]) for a in algos]
+            risk_exp = [int(self.comparison_data[a]["risk"]) for a in algos]
+
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            fig.suptitle("Algorithm Comparison", fontsize=14, fontweight="bold")
+
+            colors = plt.cm.Set2(np.linspace(0, 0.9, len(algos)))
+
+            # Plot 1: Avg Nodes Expanded
+            axes[0].bar(range(len(algos)), avg_nodes, color=colors, edgecolor="white")
+            axes[0].set_xticks(range(len(algos)))
+            axes[0].set_xticklabels(algos, rotation=35, ha="right")
+            axes[0].set_ylabel("Avg Nodes Expanded")
+            axes[0].set_title("Search Efficiency\n(fewer = better)")
+            axes[0].grid(axis="y", alpha=0.4)
+
+            # Plot 2: Avg Rescue Time
+            axes[1].bar(range(len(algos)), avg_time, color=colors, edgecolor="white")
+            axes[1].set_xticks(range(len(algos)))
+            axes[1].set_xticklabels(algos, rotation=35, ha="right")
+            axes[1].set_ylabel("Avg Rescue Time (steps)")
+            axes[1].set_title("Rescue Speed\n(lower = faster)")
+            axes[1].grid(axis="y", alpha=0.4)
+
+            # Plot 3: Risk Exposure
+            axes[2].bar(range(len(algos)), risk_exp, color=colors, edgecolor="white")
+            axes[2].set_xticks(range(len(algos)))
+            axes[2].set_xticklabels(algos, rotation=35, ha="right")
+            axes[2].set_ylabel("Risk Exposure (hazard steps)")
+            axes[2].set_title("Safety\n(fewer = safer)")
+            axes[2].grid(axis="y", alpha=0.4)
+
+            plt.tight_layout()
+            plt.savefig("figures/gui_comparison.png", dpi=150, bbox_inches="tight")
+            plt.savefig("figures/gui_comparison.pdf", dpi=150, bbox_inches="tight")
+            plt.close()
+
+            messagebox.showinfo("Success", "Chart saved to figures/gui_comparison.png")
+            self.log("📊 Comparison chart generated.", COLORS["success"])
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to plot: {e}")
+            self.log(f"✗ Plot error: {e}", COLORS["danger"])
 
     # ── Agent Logic ────────────────────────────────────────────────────────────
 
     def run_agent(self):
-        """Main agent loop — executes one rescue at a time."""
         if not self.is_running:
             return
 
         unrescued = [v for v in self.victims if not v.rescued]
         if not unrescued:
-            self.log("═" * 50, "blue")
-            self.log("✓ ALL VICTIMS RESCUED", "green")
-            self.log("═" * 50, "blue")
+            self.log("═" * 50, COLORS["accent"])
+            self.log("✓ ALL VICTIMS RESCUED", COLORS["success"])
+            self.log("═" * 50, COLORS["accent"])
             self.is_running = False
-            self.start_btn.config(state=tk.DISABLED)
-            self.pause_btn.config(state=tk.DISABLED)
+            self.save_run_results()
             return
 
-        # CSP allocation (once at start)
+        # CSP (once)
         if self.step == 0:
-            self.log("Running CSP resource allocation...", "purple")
+            self.log("Running CSP resource allocation...", COLORS["warning"])
             assignment, bt = solve_csp(unrescued, self.resources)
             self.kpis.record_backtrack("with_heuristic", bt)
-            self.log(f"✓ CSP complete (backtracks: {bt})", "green")
+            self.log(f"✓ CSP complete (backtracks: {bt})", COLORS["success"])
 
-        # Prioritize victims
         victim = self.prioritize_next_victim(unrescued)
         self.step += 1
 
-        self.log(f"\n[Step {self.step}] Rescuing V{victim.id} ({victim.severity.upper()})", "blue")
+        self.log(f"\n[Step {self.step}] Rescuing V{victim.id} ({victim.severity.upper()})", COLORS["accent"])
 
         # Dynamic events
-        blocked = self.events.maybe_block_road(self.step, probability=0.2)
+        blocked = self.events.maybe_block_road(self.step, probability=0.15)
         if blocked:
-            self.log(f"⚠ ROAD BLOCKED at {blocked} (aftershock)", "red")
+            self.log(f"⚠ ROAD BLOCKED at {blocked} (aftershock)", COLORS["danger"])
             self.kpis.record_replan()
 
-        # Route planning
-        result, strategy = self.plan_route(victim)
+        # Route
+        result = self.plan_route(victim)
         if not result.found:
-            self.log(f"✗ V{victim.id} UNREACHABLE — skipping", "red")
-            self.root.after(1000, self.run_agent)
-            return
+            self.log(f"✗ V{victim.id} UNREACHABLE — trying fallback route", COLORS["danger"])
+            # Try A* as fallback
+            result = astar(self.map, self.agent_pos, victim.position, avoid_risk=False)
+            if not result.found:
+                self.log(f"✗ No valid path — skipping V{victim.id}", COLORS["danger"])
+                self.root.after(500, self.run_agent)
+                return
 
-        self.log(f"Route: {len(result.path)-1} steps | Strategy: {strategy}", "purple")
+        self.log(f"Route: {len(result.path)-1} steps | Nodes: {result.nodes_expanded} | Risk cells: {result.risk_cells}", COLORS["text_dim"])
         self.current_route = result.path
         self.route_index = 0
-
-        # Animate movement along route
         self.animate_route(victim, result)
 
-    def prioritize_next_victim(self, unrescued: List[Victim]) -> Victim:
-        """Pick next victim: critical first, then by survival probability."""
+    def prioritize_next_victim(self, unrescued):
         scored = []
         for v in unrescued:
             dist = abs(v.position[0] - self.map.medical_centers[0][0]) + \
@@ -350,60 +521,83 @@ class AIDRASimulatorGUI:
         scored.sort(key=lambda x: (-x[0].priority, x[1]))
         return scored[0][0]
 
-    def plan_route(self, victim: Victim):
-        """Use fuzzy logic to choose route strategy."""
-        start = self.agent_pos
-        goal = victim.position
+    def plan_route(self, victim) -> SearchResult:
+        start, goal = self.agent_pos, victim.position
+        algo = self.algo_var.get()
+        risk_mode = self.risk_mode.get()
 
-        # Estimate risk
-        blockage_prob = self.estimate_blockage_prob(start, goal)
-        hazard_level = blockage_prob * 10
-        score, label, action = fuzzy_decision(blockage_prob, hazard_level,
-                                              victim.priority)
+        avoid_risk = (risk_mode == "Safe")
 
-        self.log(f"Fuzzy risk: {score:.2f} [{label}]", "orange")
-
-        # Choose A* variant
-        if label in ("HIGH", "CRITICAL"):
-            result = astar(self.map, start, goal, avoid_risk=True)
-            strategy = "A*(safe)"
-        else:
-            result = astar(self.map, start, goal, avoid_risk=False)
-            strategy = "A*(fast)"
+        # Select algorithm
+        if algo == "A*":
+            result = astar(self.map, start, goal, avoid_risk)
+        elif algo == "BFS":
+            result = bfs(self.map, start, goal)
+        elif algo == "DFS":
+            result = dfs(self.map, start, goal)
+        elif algo == "Greedy":
+            result = greedy_best_first(self.map, start, goal)
+        elif algo == "Hill Climbing":
+            result = hill_climbing(self.map, start, goal, max_restarts=10)
+        else:  # Sim. Annealing
+            result = self.simulated_annealing(start, goal)
 
         self.kpis.record_search(result)
-        return result, strategy
+        self.log(f"Algorithm: {algo} ({'safe' if avoid_risk else 'fast'} mode)", COLORS["warning"])
+        return result
 
-    def estimate_blockage_prob(self, start, goal):
-        r1, c1 = start
-        r2, c2 = goal
-        dist = abs(r1 - r2) + abs(c1 - c2)
-        if dist == 0:
-            return 0.0
-        risk_count = sum(
-            1 for t in range(dist + 1)
-            if self.map.is_high_risk((
-                r1 + round((r2 - r1) * t / dist),
-                c1 + round((c2 - c1) * t / dist)
-            ))
-        )
-        return min(risk_count / dist, 1.0)
+    def simulated_annealing(self, start, goal, max_iter=500) -> SearchResult:
+        """Simulated Annealing for path finding (fixed version)."""
+        current = start
+        current_path = [current]
+        temperature = 100.0
+        cooling_rate = 0.95
+        expanded = 0
 
-    def animate_route(self, victim: Victim, result):
-        """Move agent step-by-step along the route."""
+        for iteration in range(max_iter):
+            if current == goal:
+                return SearchResult("Sim. Annealing", current_path, expanded,
+                                   len(current_path) - 1,
+                                   sum(1 for p in current_path if self.map.is_high_risk(p)))
+
+            neighbors = self.map.neighbors(current)
+            if not neighbors:
+                break
+
+            # Pick random neighbor
+            next_pos = random.choice(neighbors)
+            expanded += 1
+
+            # Cost = distance to goal (lower is better)
+            current_cost = abs(current[0] - goal[0]) + abs(current[1] - goal[1])
+            next_cost = abs(next_pos[0] - goal[0]) + abs(next_pos[1] - goal[1])
+            delta = next_cost - current_cost
+
+            # Accept if better, or probabilistically if worse
+            if delta < 0 or random.random() < np.exp(-delta / temperature):
+                if next_pos not in current_path:  # Avoid cycles
+                    current = next_pos
+                    current_path.append(current)
+
+            temperature *= cooling_rate
+
+            if temperature < 0.1:
+                break
+
+        # If didn't reach goal, use A* as fallback
+        return astar(self.map, start, goal, avoid_risk=False)
+
+    def animate_route(self, victim, result):
         if not self.is_running or self.route_index >= len(self.current_route):
-            # Route complete — mark rescued
             self.finalize_rescue(victim, result)
             return
 
-        # Move to next cell
         self.agent_pos = self.current_route[self.route_index]
         self.route_index += 1
         self.draw_grid()
         self.root.after(self.animation_speed, lambda: self.animate_route(victim, result))
 
-    def finalize_rescue(self, victim: Victim, result):
-        """Mark victim rescued and continue to next."""
+    def finalize_rescue(self, victim, result):
         victim.rescued = True
         victim.rescue_time = len(result.path) - 1
         self.kpis.record_rescue(victim, victim.rescue_time)
@@ -412,33 +606,65 @@ class AIDRASimulatorGUI:
             self.kpis.kits_used += 1
 
         self.kpis.ambulance_trips += 1
-
-        self.log(f"✓ V{victim.id} RESCUED in {victim.rescue_time} steps", "green")
         self.current_route = []
         self.update_kpi_display()
         self.draw_grid()
 
-        # Continue to next victim after brief pause
-        self.root.after(800, self.run_agent)
+        self.log(f"✓ V{victim.id} RESCUED in {victim.rescue_time} steps", COLORS["success"])
+        self.root.after(400, self.run_agent)
 
-    # ── KPI Display ────────────────────────────────────────────────────────────
+    def save_run_results(self):
+        algo = self.algo_var.get()
+        saved = self.kpis.victims_saved
+        avg_time = self.kpis.average_rescue_time()
+        risk = sum(r.risk_cells for r in self.kpis.search_results if r.found)
+        total_nodes = sum(r.nodes_expanded for r in self.kpis.search_results if r.found)
+        avg_nodes = total_nodes / len([r for r in self.kpis.search_results if r.found]) if self.kpis.search_results else 0
+        bt = self.kpis.backtrack_counts.get("with_heuristic", 0)
+
+        # Save to comparison
+        self.comparison_data[algo] = {
+            "saved": f"{saved}/5",
+            "time": f"{avg_time:.1f}",
+            "risk": str(risk),
+            "nodes": str(total_nodes),
+            "avg_nodes": f"{avg_nodes:.1f}",
+            "bt": str(bt),
+        }
+
+        # Update table
+        self.update_comparison_table()
+
+        # Update last run KPIs
+        self.last_run_kpis = {
+            "Victims Saved:": f"{saved} / 5",
+            "Avg Rescue Time:": f"{avg_time:.1f}",
+            "Risk Exposure:": str(risk),
+            "Resource Util:": f"{self.kpis.kits_used}/10 kits",
+            "CSP Backtracks:": str(bt),
+        }
+        for key, val in self.last_run_kpis.items():
+            self.kpi_labels[key].config(text=val)
+
+        self.log(f"\nRun saved: {saved}/5 victims | Avg time: {avg_time:.1f} | Risk: {risk}", COLORS["accent"])
+
+    def update_comparison_table(self):
+        for item in self.comp_table.get_children():
+            self.comp_table.delete(item)
+        for algo, data in sorted(self.comparison_data.items()):
+            self.comp_table.insert("", "end", text=algo,
+                values=(data["saved"], data["time"], data["risk"],
+                       data["nodes"], data["bt"]))
 
     def update_kpi_display(self):
-        saved = self.kpis.victims_saved
-        total = self.kpis.victims_total
-        avg_time = self.kpis.average_rescue_time()
-
-        self.kpi_labels["Victims Saved"].config(text=f"{saved} / {total}")
-        self.kpi_labels["Current Step"].config(text=str(self.step))
-        self.kpi_labels["Avg Rescue Time"].config(text=f"{avg_time:.1f} steps")
-        self.kpi_labels["Kits Used"].config(text=f"{self.kpis.kits_used} / 10")
-        self.kpi_labels["Replan Events"].config(text=str(self.kpis.replan_count))
+        pass
 
 
-# ── Main Entry Point ───────────────────────────────────────────────────────────
+# ── Entry Point ────────────────────────────────────────────────────────────────
 
 def main():
     from environment import build_default_scenario
+    import numpy as np  # For simulated annealing
 
     grid_map, victims, resources = build_default_scenario()
     event_sim = EventSimulator(grid_map, seed=42)

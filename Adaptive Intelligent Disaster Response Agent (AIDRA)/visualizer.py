@@ -65,7 +65,7 @@ def plot_grid(grid_map: GridMap,
               victims: List[Victim],
               route: Optional[List[Tuple[int, int]]] = None,
               title: str = "AIDRA — Disaster Grid",
-              filename: str = "grid_map.png",
+              filename: str = "grid_map.pdf",
               agent_pos: Optional[Tuple[int, int]] = None) -> str:
 
     rows, cols = grid_map.rows, grid_map.cols
@@ -150,13 +150,13 @@ def plot_victim_routes(grid_map: GridMap, victims: List[Victim],
         if v:
             plot_grid(grid_map, victims, route=route,
                       title=f"Route — V{vid} ({v.severity})",
-                      filename=f"grid_route_V{vid}.png")
+                      filename=f"grid_route_V{vid}.pdf")
 
 
 # ── 4. Search algorithm comparison ────────────────────────────────────────────
 
 def plot_search_comparison(search_results: List[SearchResult],
-                           filename: str = "search_comparison.png") -> str:
+                           filename: str = "search_comparison.pdf") -> str:
     seen: Dict[str, SearchResult] = {}
     for r in search_results:
         if r.algorithm not in seen and r.found:
@@ -232,14 +232,14 @@ def plot_confusion_matrix(metrics: Dict, model_name: str,
     ax.set_title(f"Confusion Matrix — {model_name}",
                  fontsize=12, fontweight="bold", pad=18)
     plt.tight_layout()
-    fname = filename or f"cm_{model_name.replace(' ', '_')}.png"
+    fname = filename or f"cm_{model_name.replace(' ', '_')}.pdf"
     return _save(fig, fname)
 
 
 # ── 6. ML metrics grouped bar ─────────────────────────────────────────────────
 
 def plot_ml_comparison(ml_metrics: Dict,
-                       filename: str = "ml_comparison.png") -> str:
+                       filename: str = "ml_comparison.pdf") -> str:
     if not ml_metrics:
         return ""
     metric_keys = ["accuracy", "precision", "recall", "f1"]
@@ -276,7 +276,7 @@ def plot_ml_comparison(ml_metrics: Dict,
 # ── 7. Survival probability curves ────────────────────────────────────────────
 
 def plot_survival_scatter(knn_model, nb_model,
-                          filename: str = "ml_survival_scatter.png") -> str:
+                          filename: str = "ml_survival_scatter.pdf") -> str:
     """
     Plots survival probability vs distance for each severity level.
     Uses NumPy linspace to generate smooth evaluation curves.
@@ -322,7 +322,7 @@ def plot_survival_scatter(knn_model, nb_model,
 # ── 8. Rescue timeline ────────────────────────────────────────────────────────
 
 def plot_rescue_timeline(victims: List[Victim],
-                         filename: str = "rescue_timeline.png") -> str:
+                         filename: str = "rescue_timeline.pdf") -> str:
     rescued = [v for v in victims if v.rescued and v.rescue_time is not None]
     if not rescued:
         return ""
@@ -361,7 +361,7 @@ def plot_rescue_timeline(victims: List[Victim],
 # ── 9. KPI dashboard ──────────────────────────────────────────────────────────
 
 def plot_kpi_dashboard(kpi_tracker, victims: List[Victim],
-                       filename: str = "kpi_dashboard.png") -> str:
+                       filename: str = "kpi_dashboard.pdf") -> str:
     fig = plt.figure(figsize=(15, 10))
     fig.patch.set_facecolor("#edf2f7")
     gs  = GridSpec(2, 3, figure=fig, hspace=0.48, wspace=0.35)
@@ -474,7 +474,7 @@ def plot_kpi_dashboard(kpi_tracker, victims: List[Victim],
 
 # ── 10. Fuzzy logic risk surface ──────────────────────────────────────────────
 
-def plot_fuzzy_surface(filename: str = "fuzzy_surface.png") -> str:
+def plot_fuzzy_surface(filename: str = "fuzzy_surface.pdf") -> str:
     """
     3-D surface of fuzzy risk score across blockage probability × hazard level.
     NumPy meshgrid used for vectorised evaluation.
@@ -503,7 +503,7 @@ def plot_fuzzy_surface(filename: str = "fuzzy_surface.png") -> str:
 # ── 11. Agent risk heatmap ────────────────────────────────────────────────────
 
 def plot_risk_heatmap(grid_map: GridMap, victims: List[Victim],
-                      filename: str = "risk_heatmap.png") -> str:
+                      filename: str = "risk_heatmap.pdf") -> str:
     rows, cols = grid_map.rows, grid_map.cols
     risk_matrix = np.zeros((rows, cols))
 
@@ -572,11 +572,11 @@ def generate_all(grid_map: GridMap,
 
     print("\n[Visualizer] Generating all figures…")
     plot_grid(grid_map, victims, title="Initial Disaster Scenario",
-              filename="grid_initial.png")
+              filename="grid_initial.pdf")
 
     if any(v.rescued for v in victims):
         plot_grid(grid_map, victims, title="Final State — All Victims Rescued",
-                  filename="grid_final.png")
+                  filename="grid_final.pdf")
 
     if victim_routes:
         plot_victim_routes(grid_map, victims, victim_routes)
@@ -589,7 +589,7 @@ def generate_all(grid_map: GridMap,
 
     for model_name, metrics in kpi_tracker.ml_metrics.items():
         safe = model_name.replace(" ","_").replace("(","").replace(")","")
-        plot_confusion_matrix(metrics, model_name, f"cm_{safe}.png")
+        plot_confusion_matrix(metrics, model_name, f"cm_{safe}.pdf")
 
     plot_ml_comparison(kpi_tracker.ml_metrics)
 
