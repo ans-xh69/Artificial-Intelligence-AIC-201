@@ -59,8 +59,16 @@ class GridMap:
         r, c = pos
         return self.in_bounds(pos) and self.grid[r][c] == CELL_HIGH_RISK
 
-    def block_road(self, pos: Tuple[int, int]):
+    def block_road(self, pos: Tuple[int, int], 
+                   victims: Optional[List[Victim]] = None):
         r, c = pos
+    
+        # Never block victim positions
+        if victims:
+            for v in victims:
+                if not v.rescued and v.position == pos:
+                    return
+    
         if self.in_bounds(pos):
             self.grid[r][c] = CELL_BLOCKED
 
@@ -148,26 +156,38 @@ class EventSimulator:
         random.seed(seed)
         self.event_log: List[str] = []
 
-    def maybe_block_road(self, step: int, probability: float = 0.15) -> Optional[Tuple[int,int]]:
+    def maybe_block_road(self, step: int, victims: Optional[List[Victim]] = None,
+                         probability: float = 0.15) -> Optional[Tuple[int,int]]:
         """With some probability, randomly block a free cell."""
         if random.random() < probability:
+    
+            victim_positions = set()
+            
+            if victims:
+                victim_positions = {
+                    v.position
+                    for v in victims
+                    if not v.rescued
+                }
+            
             free_cells = [
                 (r, c)
                 for r in range(self.map.rows)
                 for c in range(self.map.cols)
                 if self.map.grid[r][c] == CELL_FREE
-                and (r, c) != self.map.rescue_base
-                and (r, c) not in self.map.medical_centers
+                and (r, c) not in victim_positions
             ]
+            
             if free_cells:
                 pos = random.choice(free_cells)
-                self.map.block_road(pos)
+                self.map.block_road(pos, victims)
                 msg = f"[Step {step}] DYNAMIC EVENT: Road blocked at {pos} (aftershock/fire)"
                 self.event_log.append(msg)
                 return pos
         return None
 
-    def maybe_change_risk(self, step: int, probability: float = 0.10):
+    def maybe_change_risk(self, step: int, victims: Optional[List[Victim]] = None,
+                          probability: float = 0.10):
         """Randomly upgrade a free cell to high-risk."""
         if random.random() < probability:
             free_cells = [

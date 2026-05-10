@@ -1,6 +1,7 @@
 """
 main.py
 Entry point for AIDRA — Adaptive Intelligent Disaster Response Agent.
+Run: python main.py
 """
 
 from environment import build_default_scenario, EventSimulator

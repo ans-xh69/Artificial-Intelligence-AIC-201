@@ -189,14 +189,14 @@ class AIDRAAgent:
             f"Assigned by CSP solver")
 
         # Dynamic event: maybe block a road
-        blocked = self.events.maybe_block_road(self.step)
+        blocked = self.events.maybe_block_road(self.step, victims=self.victims)
         if blocked:
             self.logger.log(self.step, "replan",
                 f"Road blocked at {blocked} — replanning route",
                 "Environmental change detected; A* reruns on updated map")
             self.kpis.record_replan()
 
-        self.events.maybe_change_risk(self.step)
+        self.events.maybe_change_risk(self.step, victims=self.victims)
 
         # Choose route to victim
         result, strategy = self.choose_route(
