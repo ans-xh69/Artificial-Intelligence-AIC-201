@@ -7,6 +7,7 @@ Run: python gui_simulator.py
 """
 
 import tkinter as tk
+import numpy as np  # For simulated annealing
 from tkinter import ttk, scrolledtext, messagebox
 from typing import List, Tuple, Optional, Dict
 import random
@@ -664,8 +665,7 @@ class AIDRASimulatorGUI:
 
 def main():
     from environment import build_default_scenario
-    import numpy as np  # For simulated annealing
-
+    
     grid_map, victims, resources = build_default_scenario()
     event_sim = EventSimulator(grid_map, seed=42)
 
