@@ -1,0 +1,6 @@
+victim_id,severity,rescue_time,position
+1,critical,18,"(5, 2)"
+0,critical,13,"(2, 7)"
+2,moderate,18,"(7, 7)"
+3,moderate,17,"(4, 5)"
+4,minor,18,"(8, 1)"
