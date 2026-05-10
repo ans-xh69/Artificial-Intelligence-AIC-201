@@ -660,19 +660,26 @@ class AIDRASimulatorGUI:
     def update_kpi_display(self):
         pass
 
-
 # ── Entry Point ────────────────────────────────────────────────────────────────
 
-def main():
-    from environment import build_default_scenario
-    
-    grid_map, victims, resources = build_default_scenario()
-    event_sim = EventSimulator(grid_map, seed=42)
-
+def launch_gui(grid_map, victims, resources, event_sim):
     root = tk.Tk()
-    app = AIDRASimulatorGUI(root, grid_map, victims, resources, event_sim)
+
+    app = AIDRASimulatorGUI(
+        root,
+        grid_map,
+        victims,
+        resources,
+        event_sim
+    )
+
     root.mainloop()
 
 
 if __name__ == "__main__":
-    main()
+    from environment import build_default_scenario
+
+    grid_map, victims, resources = build_default_scenario()
+    event_sim = EventSimulator(grid_map, seed=42)
+
+    launch_gui(grid_map, victims, resources, event_sim)
