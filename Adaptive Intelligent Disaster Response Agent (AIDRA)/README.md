@@ -173,25 +173,8 @@ tkinter is used for the GUI and is included with most Python installations.
 pandas is not required in the current version.
 
 
-Presentation Deck
-The repository includes a generated slide deck:
-
-
-AIDRA_Presentation.pptx
-
-
-You can regenerate it with:
-
-bash
-
-
-
-python make_presentation.py
-
-
-
 Project Structure
-Add to chat
+
 AIDRA/
 ├── agent.py
 ├── csp.py
