@@ -35,7 +35,7 @@ class AIDRAAgent:
         print("\n" + "="*70)
         print("AIDRA — Adaptive Intelligent Disaster Response Agent")
         print("="*70)
-        print("\n[Startup] Training ML models on synthetic disaster dataset…")
+        print("\n[Startup] Training ML models on the KTAS triage dataset...")
         self.knn, self.nb, knn_m, nb_m = train_and_evaluate()
         self.kpis.record_ml("kNN (k=5)", knn_m)
         self.kpis.record_ml("Naive Bayes", nb_m)
@@ -43,7 +43,7 @@ class AIDRAAgent:
     # ── Victim prioritisation ──────────────────────────────────────────────────
 
     def prioritise_victims(self) -> List[Victim]:
-        """Sort unrescued victims: critical first, then by ML survival probability."""
+        """Sort unrescued victims: critical first, then by KTAS urgency score."""
         unrescued = [v for v in self.victims if not v.rescued]
         scored = []
         for v in unrescued:
@@ -52,15 +52,15 @@ class AIDRAAgent:
             feats = victim_features(v, dist, risk_nearby,
                                     time_elapsed=self.step,
                                     kits_remaining=self.resources.medical_kits)
-            # Lower survival prob → higher urgency
-            survival = self.knn.predict_proba(feats)
-            scored.append((v, survival))
+            # Higher urgency score means the victim should be handled sooner
+            urgency = self.knn.predict_proba(feats)
+            scored.append((v, urgency))
             self.logger.log(self.step, "ml",
-                f"V{v.id} ({v.severity}): kNN survival_prob={survival:.2f}",
-                f"Low survival probability raises urgency")
+                f"V{v.id} ({v.severity}): KTAS urgency_score={urgency:.2f}",
+                "Higher KTAS urgency raises rescue priority")
 
-        # Sort: severity descending, then survival probability ascending (most at risk first)
-        scored.sort(key=lambda x: (-x[0].priority, x[1]))
+        # Sort: severity descending, then urgency score descending (most urgent first)
+        scored.sort(key=lambda x: (-x[0].priority, -x[1]))
         return [v for v, _ in scored]
 
     # ── Route decision ─────────────────────────────────────────────────────────
@@ -150,7 +150,7 @@ class AIDRAAgent:
         self.logger.log(self.step, "rescue",
             "Rescue priority order: " +
             ", ".join(f"V{v.id}({v.severity})" for v in priority_order),
-            "Critical victims first, then sorted by ML-estimated survival urgency")
+            "Critical victims first, then sorted by ML-estimated KTAS urgency")
 
         # Step 3: Compare search on first victim as demo
         first_victim = priority_order[0]
