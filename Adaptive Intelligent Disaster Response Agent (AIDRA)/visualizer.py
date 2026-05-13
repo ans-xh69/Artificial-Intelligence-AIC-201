@@ -18,6 +18,7 @@ Figures generated:
 """
 
 import os
+from pathlib import Path
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")   # non-interactive backend — works in any terminal
@@ -52,11 +53,16 @@ SEV_COLOR = {"critical": C["crit"], "moderate": C["mod"], "minor": C["minor"]}
 
 
 def _save(fig, filename: str) -> str:
-    path = os.path.join(OUTPUT_DIR, filename)
-    fig.savefig(path, dpi=150, bbox_inches="tight")
+    path = Path(OUTPUT_DIR) / filename
+    stem = path.with_suffix("")
+    png_path = f"{stem}.png"
+    pdf_path = f"{stem}.pdf"
+    fig.savefig(png_path, dpi=150, bbox_inches="tight")
+    fig.savefig(pdf_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"[Visualizer] Saved: {path}")
-    return path
+    print(f"[Visualizer] Saved: {png_path}")
+    print(f"[Visualizer] Saved: {pdf_path}")
+    return pdf_path
 
 
 # ── 1 & 2. Grid map ────────────────────────────────────────────────────────────
@@ -207,27 +213,32 @@ def plot_search_comparison(search_results: List[SearchResult],
 
 def plot_confusion_matrix(metrics: Dict, model_name: str,
                           filename: Optional[str] = None) -> str:
-    cm = np.array([
-        [metrics["tp"], metrics["fp"]],
-        [metrics["fn"], metrics["tn"]],
-    ])
-    cell_labels = np.array([["TP", "FP"], ["FN", "TN"]])
+    if "confusion_matrix" in metrics and "classes" in metrics:
+        cm = np.array(metrics["confusion_matrix"], dtype=int)
+        labels = [f"KTAS {cls}" for cls in metrics["classes"]]
+    else:
+        cm = np.array([
+            [metrics["tp"], metrics["fp"]],
+            [metrics["fn"], metrics["tn"]],
+        ])
+        labels = ["Positive", "Negative"]
 
-    fig, ax = plt.subplots(figsize=(5, 4.5))
+    fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.imshow(cm, cmap="Blues")
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-    ax.set_xticks([0, 1]); ax.set_yticks([0, 1])
-    ax.set_xticklabels(["Actual Positive", "Actual Negative"], fontsize=10)
-    ax.set_yticklabels(["Predicted Positive", "Predicted Negative"], fontsize=10)
+    ax.set_xticks(range(len(labels)))
+    ax.set_yticks(range(len(labels)))
+    ax.set_xticklabels(labels, fontsize=10, rotation=25, ha="right")
+    ax.set_yticklabels(labels, fontsize=10)
     ax.xaxis.set_label_position("top"); ax.xaxis.tick_top()
 
-    for i in range(2):
-        for j in range(2):
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
             text_color = "white" if cm[i, j] > cm.max() / 2 else "#2d3748"
-            ax.text(j, i, f"{cell_labels[i, j]}\n{cm[i, j]}",
+            ax.text(j, i, f"{cm[i, j]}",
                     ha="center", va="center",
-                    fontsize=13, fontweight="bold", color=text_color)
+                    fontsize=12, fontweight="bold", color=text_color)
 
     ax.set_title(f"Confusion Matrix — {model_name}",
                  fontsize=12, fontweight="bold", pad=18)
@@ -278,7 +289,7 @@ def plot_ml_comparison(ml_metrics: Dict,
 def plot_survival_scatter(knn_model, nb_model,
                           filename: str = "ml_survival_scatter.pdf") -> str:
     """
-    Plots survival probability vs distance for each severity level.
+    Plots KTAS urgency score vs distance for each severity level.
     Uses NumPy linspace to generate smooth evaluation curves.
     """
     distances  = np.linspace(1, 14, 60)
@@ -288,15 +299,22 @@ def plot_survival_scatter(knn_model, nb_model,
     linestyles = {1: ":", 2: "--", 3: "-"}
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
-    fig.suptitle("Survival Probability vs Distance to Medical Center",
+    fig.suptitle("KTAS Urgency vs Distance to Medical Center",
                  fontsize=13, fontweight="bold")
 
     for ax, model, model_name in zip(axes,
                                      [knn_model, nb_model],
                                      ["kNN (k=5)", "Gaussian Naive Bayes"]):
         for sev in severities:
+            # Match the 8-feature KTAS model used by ml_model.py
+            if sev == 1:
+                base = np.array([31.0, 0.0, 2.0, 124.0, 80.0, 82.0, 18.0, 36.8], dtype=float)
+            elif sev == 2:
+                base = np.array([54.0, 1.0, 5.5, 110.0, 70.0, 98.0, 22.0, 37.4], dtype=float)
+            else:
+                base = np.array([72.0, 1.0, 8.5, 92.0, 58.0, 118.0, 26.0, 38.0], dtype=float)
             probs = np.array([
-                model.predict_proba(np.array([float(sev), d, 0, 10.0, 5.0]))
+                model.predict_proba(base + np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, d * 0.02, 0.0]))
                 for d in distances
             ])
             ax.plot(distances, probs,
@@ -306,11 +324,11 @@ def plot_survival_scatter(knn_model, nb_model,
                     label=sev_labels[sev])
 
         ax.set_xlabel("Distance to Medical Center (steps)", fontsize=10)
-        ax.set_ylabel("Survival Probability", fontsize=10)
+        ax.set_ylabel("Urgency Score", fontsize=10)
         ax.set_title(model_name, fontsize=11, fontweight="bold")
         ax.set_ylim(-0.05, 1.1)
         ax.axhline(0.5, color="#a0aec0", linestyle="--",
-                   linewidth=1, label="Decision boundary")
+                   linewidth=1, label="Reference line")
         ax.legend(fontsize=9)
         ax.grid(alpha=0.4, linestyle="--")
         ax.set_facecolor(C["panel_bg"])
