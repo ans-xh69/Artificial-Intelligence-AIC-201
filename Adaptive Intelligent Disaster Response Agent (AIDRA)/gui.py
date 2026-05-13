@@ -17,6 +17,7 @@ from csp import solve_csp
 from ml_model import train_and_evaluate, victim_features
 from uncertainty import fuzzy_decision
 from metrics import KPITracker
+from visualizer import generate_all
 
 
 # ── Dark Theme Colors ──────────────────────────────────────────────────────────
@@ -56,7 +57,18 @@ class AIDRASimulatorGUI:
 
         self.map = grid_map
         self.victims = victims
-        self.victims_backup = [Victim(v.id, v.position, v.severity) for v in victims]
+        self.victims_backup = [
+            Victim(
+                v.id,
+                v.position,
+                v.severity,
+                patient_record=v.patient_record,
+                picked_up=v.picked_up,
+                rescued=v.rescued,
+                rescue_time=v.rescue_time,
+            )
+            for v in victims
+        ]
         self.resources = resources
         self.events = event_sim
         self.kpis = KPITracker()
@@ -71,6 +83,12 @@ class AIDRASimulatorGUI:
         self.route_index = 0
         self.ml_trained = False
         self.knn, self.nb = None, None
+        self.pending_victims: List[Victim] = []
+        self.current_trip_victims: List[Victim] = []
+        self.current_leg_type: str = ""
+        self.current_leg_goal: Optional[Tuple[int, int]] = None
+        self.current_leg_victim: Optional[Victim] = None
+        self.current_trip_load: int = 0
 
         # Comparison data
         self.comparison_data: Dict[str, Dict] = {}
@@ -161,6 +179,11 @@ class AIDRASimulatorGUI:
                                    bg=COLORS["accent"], fg="white", font=("Consolas", 10, "bold"),
                                    width=12, cursor="hand2", relief=tk.FLAT)
         self.train_btn.pack(side=tk.LEFT, padx=5)
+
+        self.pdf_btn = tk.Button(btn_frame, text="PDFs", command=self.generate_pdf_reports,
+                                 bg=COLORS["warning"], fg="white", font=("Consolas", 10, "bold"),
+                                 width=10, cursor="hand2", relief=tk.FLAT)
+        self.pdf_btn.pack(side=tk.LEFT, padx=5)
 
         # Row 3: Speed control
         tk.Label(frame, text="Speed:", bg=COLORS["bg_panel"],
@@ -352,7 +375,7 @@ class AIDRASimulatorGUI:
         if self.ml_trained:
             messagebox.showinfo("Already Trained", "ML models are already trained.")
             return
-        self.log("Training ML models (kNN + Naive Bayes)...", COLORS["warning"])
+        self.log("Training ML models on the KTAS triage dataset...", COLORS["warning"])
         self.knn, self.nb, knn_m, nb_m = train_and_evaluate()
         self.kpis.record_ml("kNN", knn_m)
         self.kpis.record_ml("Naive Bayes", nb_m)
@@ -363,6 +386,25 @@ class AIDRASimulatorGUI:
                            fg=COLORS["accent"])
         self.log("✓ ML training complete.", COLORS["success"])
 
+    def prioritize_victims(self, unrescued):
+        scored = []
+        for v in unrescued:
+            dist = abs(v.position[0] - self.map.medical_centers[0][0]) + \
+                   abs(v.position[1] - self.map.medical_centers[0][1])
+            risk_nearby = int(self.map.is_high_risk(v.position))
+            feats = victim_features(v, dist, risk_nearby, self.step,
+                                   self.resources.medical_kits)
+            urgency = self.knn.predict_proba(feats)
+            scored.append((v, urgency))
+        scored.sort(key=lambda x: (-x[0].priority, -x[1]))
+        return [v for v, _ in scored]
+
+    def _nearest_center(self, pos: Tuple[int, int]) -> Tuple[int, int]:
+        return min(
+            self.map.medical_centers,
+            key=lambda c: abs(pos[0] - c[0]) + abs(pos[1] - c[1]),
+        )
+
     def start_simulation(self):
         if self.is_running:
             return
@@ -371,6 +413,12 @@ class AIDRASimulatorGUI:
         if not self.ml_trained:
             self.train_ml_models()
 
+        self.pending_victims = self.prioritize_victims([v for v in self.victims if not v.rescued])
+        self.current_trip_victims = []
+        self.current_leg_type = ""
+        self.current_leg_goal = None
+        self.current_leg_victim = None
+        self.current_trip_load = 0
         self.is_running = True
         self.run_btn.config(state=tk.DISABLED)
         self.log("═" * 50, COLORS["accent"])
@@ -384,9 +432,26 @@ class AIDRASimulatorGUI:
         self.route_index = 0
         self.current_route = []
         self.agent_pos = self.map.rescue_base
+        self.pending_victims = []
+        self.current_trip_victims = []
+        self.current_leg_type = ""
+        self.current_leg_goal = None
+        self.current_leg_victim = None
+        self.current_trip_load = 0
 
         # Reset victims
-        self.victims = [Victim(v.id, v.position, v.severity) for v in self.victims_backup]
+        self.victims = [
+            Victim(
+                v.id,
+                v.position,
+                v.severity,
+                patient_record=v.patient_record,
+                picked_up=v.picked_up,
+                rescued=v.rescued,
+                rescue_time=v.rescue_time,
+            )
+            for v in self.victims_backup
+        ]
 
         # Reset KPIs
         self.kpis = KPITracker()
@@ -462,6 +527,31 @@ class AIDRASimulatorGUI:
 
     # ── Agent Logic ────────────────────────────────────────────────────────────
 
+    def generate_pdf_reports(self):
+        if not self.ml_trained:
+            self.train_ml_models()
+
+        if not self.kpis.search_results:
+            messagebox.showwarning("No Results", "Run the simulation first so PDF reports can be generated.")
+            return
+
+        try:
+            self.log("Generating full PDF and PNG report set...", COLORS["warning"])
+            generate_all(
+                self.map,
+                self.victims,
+                self.kpis,
+                comparison_results=self.kpis.search_results,
+                knn_model=self.knn,
+                nb_model=self.nb,
+                victim_routes=None,
+            )
+            messagebox.showinfo("Exported", "All report figures were saved as PNG and PDF in figures/.")
+            self.log("✓ PDF/PNG reports generated.", COLORS["success"])
+        except Exception as e:
+            messagebox.showerror("PDF Export Failed", f"Could not generate reports: {e}")
+            self.log(f"✗ PDF generation failed: {e}", COLORS["danger"])
+
     def run_agent(self):
         if not self.is_running:
             return
@@ -481,49 +571,64 @@ class AIDRASimulatorGUI:
             assignment, bt = solve_csp(unrescued, self.resources)
             self.kpis.record_backtrack("with_heuristic", bt)
             self.log(f"✓ CSP complete (backtracks: {bt})", COLORS["success"])
+        if not self.current_trip_victims and self.pending_victims:
+            self.current_trip_victims = self.pending_victims[:2]
+            self.pending_victims = self.pending_victims[2:]
+            self.current_trip_load = 0
+            self.log(
+                "Trip load: " + ", ".join(f"V{v.id}({v.severity.upper()})" for v in self.current_trip_victims),
+                COLORS["warning"],
+            )
 
-        victim = self.prioritize_next_victim(unrescued)
-        self.step += 1
+        if not self.current_trip_victims:
+            self.is_running = False
+            self.run_btn.config(state=tk.NORMAL)
+            self.save_run_results()
+            return
 
-        self.log(f"\n[Step {self.step}] Rescuing V{victim.id} ({victim.severity.upper()})", COLORS["accent"])
-
-        # Dynamic events
-        blocked = self.events.maybe_block_road(self.step, probability=0.15)
-        if blocked:
-            self.log(f"⚠ ROAD BLOCKED at {blocked} (aftershock)", COLORS["danger"])
-            self.kpis.record_replan()
-
-        # Route
-        result = self.plan_route(victim)
-        if not result.found:
-            self.log(f"✗ V{victim.id} UNREACHABLE — trying fallback route", COLORS["danger"])
-            # Try A* as fallback
-            result = astar(self.map, self.agent_pos, victim.position, avoid_risk=False)
+        if self.current_trip_load < len(self.current_trip_victims):
+            victim = self.current_trip_victims[self.current_trip_load]
+            self.step += 1
+            self.log(f"\n[Step {self.step}] Picking up V{victim.id} ({victim.severity.upper()})", COLORS["accent"])
+            result = self.plan_route_to_goal(victim.position, victim)
             if not result.found:
-                self.log(f"✗ No valid path — skipping V{victim.id}", COLORS["danger"])
-                self.root.after(500, self.run_agent)
+                self.log(f"✗ V{victim.id} UNREACHABLE — skipping", COLORS["danger"])
+                self.current_trip_load += 1
+                self.root.after(300, self.run_agent)
                 return
+            self.current_leg_type = "victim"
+            self.current_leg_goal = victim.position
+            self.current_leg_victim = victim
+            self.current_route = result.path
+            self.route_index = 0
+            self.animate_route()
+            return
 
-        self.log(f"Route: {len(result.path)-1} steps | Nodes: {result.nodes_expanded} | Risk cells: {result.risk_cells}", COLORS["text_dim"])
+        if not any(v.picked_up for v in self.current_trip_victims):
+            self.current_trip_victims = []
+            self.current_trip_load = 0
+            self.root.after(300, self.run_agent)
+            return
+
+        self.step += 1
+        center = self._nearest_center(self.agent_pos)
+        self.log(f"\n[Step {self.step}] Delivering batch to medical center {center}", COLORS["accent"])
+        result = self.plan_route_to_goal(center, None)
+        if not result.found:
+            self.log("✗ No valid route to medical center — stopping batch", COLORS["danger"])
+            self.is_running = False
+            self.run_btn.config(state=tk.NORMAL)
+            self.save_run_results()
+            return
+        self.current_leg_type = "center"
+        self.current_leg_goal = center
+        self.current_leg_victim = None
         self.current_route = result.path
         self.route_index = 0
-        self.animate_route(victim, result)
+        self.animate_route()
 
-    def prioritize_next_victim(self, unrescued):
-        scored = []
-        for v in unrescued:
-            dist = abs(v.position[0] - self.map.medical_centers[0][0]) + \
-                   abs(v.position[1] - self.map.medical_centers[0][1])
-            risk_nearby = int(self.map.is_high_risk(v.position))
-            feats = victim_features(v, dist, risk_nearby, self.step,
-                                   self.resources.medical_kits)
-            survival = self.knn.predict_proba(feats)
-            scored.append((v, survival))
-        scored.sort(key=lambda x: (-x[0].priority, x[1]))
-        return scored[0][0]
-
-    def plan_route(self, victim) -> SearchResult:
-        start, goal = self.agent_pos, victim.position
+    def plan_route_to_goal(self, goal, victim=None) -> SearchResult:
+        start = self.agent_pos
         algo = self.algo_var.get()
         risk_mode = self.risk_mode.get()
 
@@ -588,31 +693,58 @@ class AIDRASimulatorGUI:
         # If didn't reach goal, use A* as fallback
         return astar(self.map, start, goal, avoid_risk=False)
 
-    def animate_route(self, victim, result):
+    def animate_route(self):
         if not self.is_running or self.route_index >= len(self.current_route):
-            self.finalize_rescue(victim, result)
+            self.finalize_current_leg()
             return
 
         self.agent_pos = self.current_route[self.route_index]
         self.route_index += 1
         self.draw_grid()
-        self.root.after(self.animation_speed, lambda: self.animate_route(victim, result))
+        self.root.after(self.animation_speed, self.animate_route)
 
-    def finalize_rescue(self, victim, result):
-        victim.rescued = True
-        victim.rescue_time = len(result.path) - 1
-        self.kpis.record_rescue(victim, victim.rescue_time)
+    def finalize_current_leg(self):
+        if self.current_leg_type == "victim" and self.current_leg_victim is not None:
+            victim = self.current_leg_victim
+            victim.picked_up = True
+            if self.resources.use_kit():
+                self.kpis.kits_used += 1
+            self.current_trip_load += 1
+            self.agent_pos = victim.position
+            self.log(f"✓ V{victim.id} PICKED UP ({victim.severity.upper()})", COLORS["success"])
+            self.draw_grid()
 
-        if self.resources.use_kit():
-            self.kpis.kits_used += 1
+            if self.current_trip_load < len(self.current_trip_victims):
+                self.root.after(300, self.run_agent)
+                return
 
-        self.kpis.ambulance_trips += 1
-        self.current_route = []
-        self.update_kpi_display()
-        self.draw_grid()
+            self.root.after(300, self.run_agent)
+            return
 
-        self.log(f"✓ V{victim.id} RESCUED in {victim.rescue_time} steps", COLORS["success"])
-        self.root.after(400, self.run_agent)
+        if self.current_leg_type == "center" and self.current_leg_goal is not None:
+            delivered = [v for v in self.current_trip_victims if v.picked_up]
+            trip_time = len(self.current_route) - 1
+            for victim in delivered:
+                victim.rescue_time = trip_time
+                self.kpis.record_rescue(victim, trip_time)
+                self.log(f"✓ V{victim.id} DELIVERED to medical center in {trip_time} steps", COLORS["success"])
+
+            self.kpis.ambulance_trips += 1
+            self.agent_pos = self.current_leg_goal
+            for victim in self.current_trip_victims:
+                victim.rescued = True
+                victim.picked_up = False
+            self.update_kpi_display()
+            self.draw_grid()
+            self.current_trip_victims = []
+            self.current_trip_load = 0
+            self.current_leg_type = ""
+            self.current_leg_goal = None
+            self.current_leg_victim = None
+            self.root.after(300, self.run_agent)
+            return
+
+        self.root.after(300, self.run_agent)
 
     def save_run_results(self):
         algo = self.algo_var.get()
