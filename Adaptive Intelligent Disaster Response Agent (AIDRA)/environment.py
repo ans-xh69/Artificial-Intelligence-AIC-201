@@ -3,7 +3,9 @@ environment.py
 Grid map, victims, risk zones, medical centers, and dynamic event simulation.
 """
 
+import csv
 import random
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Optional
 
@@ -11,12 +13,15 @@ from typing import List, Tuple, Dict, Optional
 # ── Victim ────────────────────────────────────────────────────────────────────
 
 SEVERITY_LEVELS = {"critical": 3, "moderate": 2, "minor": 1}
+KTAS_TO_SEVERITY = {1: "critical", 2: "critical", 3: "moderate", 4: "moderate", 5: "minor"}
 
 @dataclass
 class Victim:
     id: int
     position: Tuple[int, int]
     severity: str          # 'critical', 'moderate', 'minor'
+    patient_record: Optional[Dict[str, str]] = None
+    picked_up: bool = False
     rescued: bool = False
     rescue_time: Optional[float] = None
 
@@ -27,6 +32,41 @@ class Victim:
     def __repr__(self):
         status = "RESCUED" if self.rescued else "WAITING"
         return f"Victim(id={self.id}, pos={self.position}, severity={self.severity}, {status})"
+
+
+def _dataset_path() -> Path:
+    return Path(__file__).with_name("dataset_clean.csv")
+
+
+def _load_random_dataset_victims(count: int = 5) -> List[Victim]:
+    path = _dataset_path()
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Missing {path.name}. Place the cleaned dataset next to environment.py."
+        )
+
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows = [row for row in reader if row.get("KTAS_expert") or row.get("KTAS_RN")]
+
+    if len(rows) < count:
+        raise ValueError(f"Need at least {count} usable rows in {path.name}, found {len(rows)}")
+
+    secure_random = random.SystemRandom()
+    sampled_rows = secure_random.sample(rows, count)
+
+    victims: List[Victim] = []
+    for idx, row in enumerate(sampled_rows):
+        ktas_raw = row.get("KTAS_expert") or row.get("KTAS_RN")
+        try:
+            ktas = int(float(str(ktas_raw).replace(",", ".")))
+        except ValueError:
+            ktas = 3
+        ktas = max(1, min(5, ktas))
+        severity = KTAS_TO_SEVERITY.get(ktas, "moderate")
+        victims.append(Victim(id=idx, position=(0, 0), severity=severity, patient_record=row))
+
+    return victims
 
 
 # ── Grid Map ──────────────────────────────────────────────────────────────────
@@ -66,7 +106,7 @@ class GridMap:
         # Never block victim positions
         if victims:
             for v in victims:
-                if not v.rescued and v.position == pos:
+                if not v.rescued and not v.picked_up and v.position == pos:
                     return
     
         if self.in_bounds(pos):
@@ -79,7 +119,7 @@ class GridMap:
 
     def print_map(self, victims: List[Victim], agent_pos: Optional[Tuple[int,int]] = None):
         symbols = {CELL_FREE: '.', CELL_BLOCKED: '#', CELL_HIGH_RISK: '!'}
-        victim_positions = {v.position: v for v in victims if not v.rescued}
+        victim_positions = {v.position: v for v in victims if not v.rescued and not v.picked_up}
         print("\n  " + " ".join(str(c) for c in range(self.cols)))
         for r in range(self.rows):
             row_str = f"{r} "
@@ -216,8 +256,8 @@ def build_default_scenario() -> Tuple[GridMap, List[Victim], Resources]:
     # Rescue base at top-left
     gmap.rescue_base = (0, 0)
 
-    # Two medical centers
-    gmap.medical_centers = [(0, 9), (9, 9)]
+    # Two fixed medical centers
+    gmap.medical_centers = [(0, 9), (9, 0)]
 
     # Pre-defined high-risk zones (fire / structural collapse)
     high_risk = [(2,2),(2,3),(3,2),(3,3),(5,5),(5,6),(6,5)]
@@ -229,14 +269,24 @@ def build_default_scenario() -> Tuple[GridMap, List[Victim], Resources]:
     for r, c in blocked:
         gmap.grid[r][c] = CELL_BLOCKED
 
-    # Five victims at specific positions
-    victims = [
-        Victim(id=0, position=(2,7), severity="critical"),
-        Victim(id=1, position=(5,2), severity="critical"),
-        Victim(id=2, position=(7,7), severity="moderate"),
-        Victim(id=3, position=(4,5), severity="moderate"),
-        Victim(id=4, position=(8,1), severity="minor"),
-    ]
+    # Five victims sampled from the real triage dataset.
+    victims = _load_random_dataset_victims(count=5)
+
+    # Sample different free cells every run so the scenario changes naturally.
+    # Spread victims across different columns to avoid clustering.
+    reserved_positions = set(gmap.medical_centers + [gmap.rescue_base] + high_risk + blocked)
+    free_by_col = {
+        c: [(r, c) for r in range(rows) if (r, c) not in reserved_positions]
+        for c in range(cols)
+    }
+    eligible_cols = [c for c, cells in free_by_col.items() if cells]
+    secure_random = random.SystemRandom()
+    sampled_cols = secure_random.sample(eligible_cols, len(victims))
+    sampled_positions = []
+    for col in sampled_cols:
+        sampled_positions.append(secure_random.choice(free_by_col[col]))
+    for victim, position in zip(victims, sampled_positions):
+        victim.position = position
 
     resources = Resources()
 
